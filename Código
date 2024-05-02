@@ -1,0 +1,190 @@
+valid_emails = []  # Definindo 'valid_emails' para garantir acessibilidade
+import requests
+import re
+import signal
+import sys
+import zipfile
+from dns.resolver import resolve, NXDOMAIN, NoAnswer, Timeout
+from io import BytesIO
+from colorama import init, Fore
+import os
+
+# Inicialização do Colorama
+init(autoreset=True)
+
+# URLs
+EMAIL_BLACKLIST_URL = "blacklist.txt"
+SPAMTRAP_LIST_URL = "spamtraps.txt"
+SUPPRESSED_DOMAINS_URL = "suppressed_domains.txt"
+
+# Funções auxiliares
+def has_excessive_numbers(email):
+    return sum(c.isdigit() for c in email) > 4
+
+def has_repeated_characters(email, limit=4):
+    for char in set(email):
+        if email.count(char) >= limit:
+            return True
+    return False
+
+def download_and_extract_data(file_path):
+    data_set = set()
+    try:
+        with open(file_path, "r") as file:
+            for line in file:
+                data = line.strip()
+                data_set.add(data)
+    except FileNotFoundError:
+        print(f"Arquivo '{file_path}' não encontrado.")
+    return data_set
+
+def is_valid_format(email):
+    email_regex = r"[^@]+@[^@]+\.[^@]+"
+    return bool(re.match(email_regex, email))
+
+DISPOSABLE_DOMAINS = ["tempmail.com", "mailinator.com", "10minutemail.com"]
+def is_disposable_domain(domain):
+    return domain in DISPOSABLE_DOMAINS
+
+COMMON_MISTAKES = {
+    "gamil.com": "gmail.com"
+}
+def common_domain_mistake(domain):
+    return COMMON_MISTAKES.get(domain)
+
+ROLE_BASED_PREFIXES = ["admin", "support", "info", "contact", "webmaster"]
+def is_role_based_account(email):
+    prefix = email.split('@')[0]
+    return prefix in ROLE_BASED_PREFIXES
+
+def has_dns_record(domain, record_type):
+    try:
+        resolve(domain, record_type)
+        return True
+    except NXDOMAIN:
+        print(Fore.YELLOW + "Domínio não encontrado!")
+    except NoAnswer:
+        print(Fore.YELLOW + "Nenhuma resposta para o tipo de registro solicitado!")
+    except Timeout:
+        print(Fore.YELLOW + "Tempo limite de consulta excedido!")
+    except Exception as e:
+        print(Fore.YELLOW + f"Erro ao resolver DNS: {e}")
+    return False
+
+def save_valid_emails(valid_emails):
+    with open("emails_validos.txt", "w") as output_file:
+        for email in valid_emails:
+            output_file.write(email + "\n")
+
+def signal_handler(signum, frame):
+    if signum == signal.SIGINT:
+        print("\nInterrupção detectada! Salvando e-mails válidos processados...")
+        save_valid_emails(valid_emails)
+        print(f"{len(valid_emails)} e-mails válidos foram salvos em 'emails_validos.txt'.")
+        sys.exit(0)
+
+def check_password():
+    correct_password = "007-2023"
+    attempts = 3
+
+    for _ in range(attempts):
+        password = input("Digite a senha para continuar: ").strip()
+        if password == correct_password:
+            return True
+        print(f"Senha incorreta! Você tem {attempts - 1} tentativa(s) restante(s).")
+        attempts -= 1
+
+    print("Muitas tentativas incorretas!")
+    sys.exit(1)
+
+    domain = email.split('@')[-1]
+    
+    if has_repeated_characters(email):
+        if has_dns_record(domain, 'MX'):
+            return True
+    return False
+
+def main():
+    check_password()
+
+    BLACKLISTED_EMAILS = download_and_extract_data(EMAIL_BLACKLIST_URL)
+    SPAMTRAPS = download_and_extract_data(SPAMTRAP_LIST_URL)
+    SUPPRESSED_DOMAINS = download_and_extract_data(SUPPRESSED_DOMAINS_URL)
+
+    resposta = input("Deseja validar os registros MX de seus e-mails? (sim/não) ").strip().lower()
+    if resposta == "sim":
+        try:
+            with open("emails.txt", "r") as file:
+                emails = file.readlines()
+        except FileNotFoundError:
+            print("Arquivo 'emails.txt' não encontrado no diretório atual.")
+            return
+
+        global valid_emails
+        valid_emails = []
+        total_emails = len(emails)
+        start_index = load_start_index()
+        
+        for index, email in enumerate(emails[start_index:], start_index + 1):
+            email = email.strip()
+            domain = email.split('@')[1] if "@" in email else ""
+
+            print(f"Validando {index}/{total_emails}: {email} ...", end=" ")
+
+            if email in BLACKLISTED_EMAILS or domain in SUPPRESSED_DOMAINS:
+                print(Fore.RED + "INVÁLIDO! (E-mail ou domínio na lista negra)")
+                continue
+
+            if email in SPAMTRAPS:
+                print(Fore.RED + "INVÁLIDO! (E-mail identificado como spamtrap)")
+                continue
+
+            if has_excessive_numbers(email):
+                print(Fore.RED + "INVÁLIDO! (E-mail com excesso de números)")
+                continue
+
+            if not is_valid_format(email):
+                print(Fore.RED + "INVÁLIDO! (Formato incorreto)")
+                continue
+
+            if is_disposable_domain(domain):
+                print(Fore.RED + "INVÁLIDO! (Domínio descartável)")
+                continue
+
+            if common_domain_mistake(domain):
+                print(Fore.YELLOW + f"AVISO: Você quis dizer {common_domain_mistake(domain)}?")
+                
+            if is_role_based_account(email):
+                print(Fore.YELLOW + "AVISO: Conta baseada em função detectada!")
+
+                print(Fore.RED + "INVÁLIDO! (E-mail com caracteres repetidos)")
+                continue
+
+            if not (has_dns_record(domain, 'MX') or has_dns_record(domain, 'A') or has_dns_record(domain, 'AAAA')):
+                print(Fore.RED + "INVÁLIDO! (Sem registros MX, A ou AAAA)")
+                continue
+
+            print(Fore.GREEN + "VÁLIDO!")
+            valid_emails.append(email)
+
+            if len(valid_emails) % 10 == 0:
+                save_valid_emails(valid_emails)
+                save_start_index(index)
+
+        save_valid_emails(valid_emails)
+        save_start_index(total_emails)
+
+def load_start_index():
+    if os.path.exists("start_index.txt"):
+        with open("start_index.txt", "r") as start_index_file:
+            return int(start_index_file.read().strip())
+    else:
+        return 0
+
+def save_start_index(start_index):
+    with open("start_index.txt", "w") as start_index_file:
+        start_index_file.write(str(start_index))
+
+if __name__ == "__main__":
+    signal.signal(signal.SIGINT, signal_handler)
+    main()
